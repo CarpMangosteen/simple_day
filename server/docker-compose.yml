@@ -1,0 +1,11 @@
+services:
+  simple-day:
+    build: .
+    container_name: simple-day
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "18080:18080"
+    volumes:
+      - ./data:/data

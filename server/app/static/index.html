@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simple Day</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #202124;
+      --muted: #656d76;
+      --line: #d7dee8;
+      --panel: #ffffff;
+      --page: #f4f6f8;
+      --blue: #1f6feb;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --amber: #9a6700;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.4;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--line);
+    }
+    .bar {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+    section, .login {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+    section h2 {
+      margin: 0;
+      padding: 12px 12px 0;
+      font-size: 15px;
+    }
+    form {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      color: var(--ink);
+      background: #fff;
+      font: inherit;
+      font-size: 14px;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 14px;
+      min-height: 36px;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+    button.danger { color: var(--red); }
+    button.done { color: var(--green); }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .list {
+      border-top: 1px solid var(--line);
+      display: grid;
+    }
+    .item {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      gap: 6px;
+    }
+    .item:last-child { border-bottom: 0; }
+    .item.done-item .title { text-decoration: line-through; color: var(--muted); }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .title {
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
+    .login {
+      max-width: 420px;
+      margin: 64px auto 0;
+    }
+    .hidden { display: none !important; }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+      .bar { align-items: flex-start; flex-direction: column; }
+      .status { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <h1>Simple Day</h1>
+      <div class="status" id="status"></div>
+    </div>
+  </header>
+
+  <div class="login" id="loginPanel">
+    <form id="loginForm">
+      <label>Admin password
+        <input id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="primary" type="submit">Log in</button>
+    </form>
+  </div>
+
+  <main id="app" class="hidden">
+    <section>
+      <h2>Events</h2>
+      <form id="eventForm">
+        <label>Title
+          <input name="title" required maxlength="80" placeholder="设计评审">
+        </label>
+        <label>Time
+          <input name="starts_at" type="datetime-local" required>
+        </label>
+        <label>With
+          <input name="participants" maxlength="120" placeholder="李小宇, 小姜">
+        </label>
+        <label>Where
+          <input name="location" maxlength="80" placeholder="腾讯会议">
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" data-reset="eventForm">Clear</button>
+        </div>
+      </form>
+      <div class="list" id="events"></div>
+    </section>
+
+    <section>
+      <h2>TODO</h2>
+      <form id="todoForm">
+        <label>Task
+          <input name="title" required maxlength="100" placeholder="整理 Simple Day UI 草稿">
+        </label>
+        <button class="primary" type="submit">Add</button>
+      </form>
+      <div class="list" id="todos"></div>
+    </section>
+
+    <section>
+      <h2>Deadlines</h2>
+      <form id="deadlineForm">
+        <label>Title
+          <input name="title" required maxlength="100" placeholder="v1.0 simple 发布">
+        </label>
+        <label>Due
+          <input name="due_date" type="date" required>
+        </label>
+        <button class="primary" type="submit">Add</button>
+      </form>
+      <div class="list" id="deadlines"></div>
+    </section>
+  </main>
+
+  <script>
+    const statusEl = document.querySelector("#status");
+    const loginPanel = document.querySelector("#loginPanel");
+    const appEl = document.querySelector("#app");
+    const tokenKey = "simple-day-admin-token";
+    let token = localStorage.getItem(tokenKey) || "";
+
+    const headers = () => ({
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    });
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: { ...headers(), ...(options.headers || {}) }
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `${res.status} ${res.statusText}`);
+      }
+      return res.json();
+    }
+
+    function showApp() {
+      loginPanel.classList.add("hidden");
+      appEl.classList.remove("hidden");
+    }
+
+    function showLogin() {
+      loginPanel.classList.remove("hidden");
+      appEl.classList.add("hidden");
+    }
+
+    function esc(text) {
+      return String(text || "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[c]));
+    }
+
+    function datetimeLocal(value) {
+      return String(value || "").slice(0, 16);
+    }
+
+    function splitPeople(value) {
+      return String(value || "")
+        .split(",")
+        .map(item => item.trim())
+        .filter(Boolean);
+    }
+
+    function renderItems(data) {
+      document.querySelector("#events").innerHTML = data.events.map(item => `
+        <div class="item">
+          <div class="title">${esc(item.title)}</div>
+          <div class="meta">${esc(datetimeLocal(item.starts_at).replace("T", " "))}${item.participants.length ? " · with " + esc(item.participants.join(", ")) : ""}${item.location ? " · " + esc(item.location) : ""}</div>
+          <div class="actions">
+            <button type="button" data-edit-event="${item.id}">Edit</button>
+            <button class="danger" type="button" data-delete="events:${item.id}">Delete</button>
+          </div>
+        </div>
+      `).join("");
+
+      document.querySelector("#todos").innerHTML = data.todos.map(item => `
+        <div class="item ${item.completed ? "done-item" : ""}">
+          <div class="title">${esc(item.title)}</div>
+          <div class="actions">
+            <button class="done" type="button" data-complete-todo="${item.id}:${item.completed ? 0 : 1}">${item.completed ? "Open" : "Done"}</button>
+            <button type="button" data-edit-todo="${item.id}">Edit</button>
+            <button class="danger" type="button" data-delete="todos:${item.id}">Delete</button>
+          </div>
+        </div>
+      `).join("");
+
+      document.querySelector("#deadlines").innerHTML = data.deadlines.map(item => `
+        <div class="item ${item.completed ? "done-item" : ""}">
+          <div class="title">${esc(item.title)}</div>
+          <div class="meta">${esc(item.due_date)}</div>
+          <div class="actions">
+            <button class="done" type="button" data-complete-deadline="${item.id}:${item.completed ? 0 : 1}">${item.completed ? "Open" : "Done"}</button>
+            <button type="button" data-edit-deadline="${item.id}">Edit</button>
+            <button class="danger" type="button" data-delete="deadlines:${item.id}">Delete</button>
+          </div>
+        </div>
+      `).join("");
+
+      window.currentItems = data;
+    }
+
+    async function loadItems() {
+      const data = await api("/api/items");
+      renderItems(data);
+      setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+    }
+
+    document.querySelector("#loginForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const password = document.querySelector("#password").value;
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password })
+        });
+        if (!res.ok) throw new Error("Login failed");
+        token = password;
+        localStorage.setItem(tokenKey, token);
+        showApp();
+        await loadItems();
+      } catch (err) {
+        setStatus(err.message);
+      }
+    });
+
+    document.querySelector("#eventForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const payload = {
+        title: data.get("title"),
+        starts_at: data.get("starts_at"),
+        participants: splitPeople(data.get("participants")),
+        location: data.get("location")
+      };
+      const id = form.dataset.editId;
+      await api(id ? `/api/events/${id}` : "/api/events", {
+        method: id ? "PATCH" : "POST",
+        body: JSON.stringify(payload)
+      });
+      form.reset();
+      delete form.dataset.editId;
+      await loadItems();
+    });
+
+    document.querySelector("#todoForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const title = new FormData(event.currentTarget).get("title");
+      await api("/api/todos", { method: "POST", body: JSON.stringify({ title }) });
+      event.currentTarget.reset();
+      await loadItems();
+    });
+
+    document.querySelector("#deadlineForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await api("/api/deadlines", {
+        method: "POST",
+        body: JSON.stringify({ title: data.get("title"), due_date: data.get("due_date") })
+      });
+      event.currentTarget.reset();
+      await loadItems();
+    });
+
+    document.body.addEventListener("click", async event => {
+      const target = event.target;
+      if (!(target instanceof HTMLButtonElement)) return;
+
+      if (target.dataset.reset) {
+        const form = document.querySelector(`#${target.dataset.reset}`);
+        form.reset();
+        delete form.dataset.editId;
+        return;
+      }
+
+      if (target.dataset.editEvent) {
+        const item = window.currentItems.events.find(row => row.id == target.dataset.editEvent);
+        const form = document.querySelector("#eventForm");
+        form.title.value = item.title;
+        form.starts_at.value = datetimeLocal(item.starts_at);
+        form.participants.value = item.participants.join(", ");
+        form.location.value = item.location || "";
+        form.dataset.editId = item.id;
+        form.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+
+      if (target.dataset.delete) {
+        const [kind, id] = target.dataset.delete.split(":");
+        await api(`/api/${kind}/${id}`, { method: "DELETE" });
+        await loadItems();
+        return;
+      }
+
+      if (target.dataset.completeTodo) {
+        const [id, value] = target.dataset.completeTodo.split(":");
+        await api(`/api/todos/${id}`, { method: "PATCH", body: JSON.stringify({ completed: value === "1" }) });
+        await loadItems();
+        return;
+      }
+
+      if (target.dataset.completeDeadline) {
+        const [id, value] = target.dataset.completeDeadline.split(":");
+        await api(`/api/deadlines/${id}`, { method: "PATCH", body: JSON.stringify({ completed: value === "1" }) });
+        await loadItems();
+        return;
+      }
+
+      if (target.dataset.editTodo) {
+        const item = window.currentItems.todos.find(row => row.id == target.dataset.editTodo);
+        const title = prompt("TODO", item.title);
+        if (title) {
+          await api(`/api/todos/${item.id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+          await loadItems();
+        }
+        return;
+      }
+
+      if (target.dataset.editDeadline) {
+        const item = window.currentItems.deadlines.find(row => row.id == target.dataset.editDeadline);
+        const title = prompt("Deadline", item.title);
+        if (title) {
+          await api(`/api/deadlines/${item.id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+          await loadItems();
+        }
+      }
+    });
+
+    (async () => {
+      if (!token) {
+        showLogin();
+        return;
+      }
+      try {
+        showApp();
+        await loadItems();
+      } catch (err) {
+        localStorage.removeItem(tokenKey);
+        token = "";
+        showLogin();
+        setStatus("Please log in");
+      }
+    })();
+  </script>
+</body>
+</html>

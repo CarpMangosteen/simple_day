@@ -1,0 +1,22 @@
+.env
+.venv/
+.platformio/
+.tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Server runtime data
+server/data/
+server/tests/*.sqlite
+server/.env
+server/.env.local
+
+# Firmware secrets and PlatformIO output
+firmware/src/secrets.h
+firmware/.pio/
+firmware/.vscode/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
