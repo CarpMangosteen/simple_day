@@ -353,27 +353,29 @@
         method: id ? "PATCH" : "POST",
         body: JSON.stringify(payload)
       });
-      form.reset();
+      if (form && typeof form.reset === "function") form.reset();
       delete form.dataset.editId;
       await loadItems();
     });
 
     document.querySelector("#todoForm").addEventListener("submit", async event => {
       event.preventDefault();
-      const title = new FormData(event.currentTarget).get("title");
+      const form = event.currentTarget;
+      const title = new FormData(form).get("title");
       await api("/api/todos", { method: "POST", body: JSON.stringify({ title }) });
-      event.currentTarget.reset();
+      if (form && typeof form.reset === "function") form.reset();
       await loadItems();
     });
 
     document.querySelector("#deadlineForm").addEventListener("submit", async event => {
       event.preventDefault();
-      const data = new FormData(event.currentTarget);
+      const form = event.currentTarget;
+      const data = new FormData(form);
       await api("/api/deadlines", {
         method: "POST",
         body: JSON.stringify({ title: data.get("title"), due_date: data.get("due_date") })
       });
-      event.currentTarget.reset();
+      if (form && typeof form.reset === "function") form.reset();
       await loadItems();
     });
 
@@ -383,8 +385,10 @@
 
       if (target.dataset.reset) {
         const form = document.querySelector(`#${target.dataset.reset}`);
-        form.reset();
-        delete form.dataset.editId;
+        if (form && typeof form.reset === "function") {
+          form.reset();
+          delete form.dataset.editId;
+        }
         return;
       }
 

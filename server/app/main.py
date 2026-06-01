@@ -43,6 +43,10 @@ class TodoPatch(BaseModel):
     completed: bool | None = None
 
 
+class DeviceTodoPatch(BaseModel):
+    completed: bool
+
+
 class DeadlineIn(BaseModel):
     title: str
     due_date: str
@@ -212,3 +216,18 @@ def device_feed(token: str = Query(default=""), conn=Depends(get_conn)):
     todos = db.rows(conn, "SELECT * FROM todos ORDER BY id")
     deadlines = db.rows(conn, "SELECT * FROM deadlines ORDER BY due_date, id")
     return compose_feed(events, todos, deadlines)
+
+
+@app.patch("/api/device/todos/{item_id}")
+def patch_device_todo(
+    item_id: int,
+    payload: DeviceTodoPatch,
+    token: str = Query(default=""),
+    conn=Depends(get_conn),
+):
+    if token != device_token():
+        raise HTTPException(status_code=401, detail="invalid device token")
+    updated = db.update_todo(conn, item_id, {"completed": payload.completed})
+    if not updated:
+        raise HTTPException(status_code=404, detail="todo not found")
+    return updated

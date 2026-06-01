@@ -128,11 +128,12 @@ def compose_feed(events, todos, deadlines, now=None):
     todo_payload = []
     for row in todos:
         item = dict(row)
-        if int(item.get("completed") or 0):
-            continue
         title = str(item.get("title", "")).strip()
-        if title:
-            todo_payload.append({"id": item.get("id"), "title": title})
+        if not title:
+            continue
+        completed = bool(int(item.get("completed") or 0))
+        todo_payload.append({"id": item.get("id"), "title": title, "completed": completed})
+    todo_payload.sort(key=lambda item: (item.get("completed", False), item.get("id") or 0))
 
     deadline_payload = []
     for row in deadlines:

@@ -23,6 +23,12 @@ constexpr uint8_t BATTERY_BRIGHTNESS = 70;
 constexpr size_t MAX_TODAY = 10;
 constexpr size_t MAX_TODOS = 14;
 constexpr size_t MAX_DEADLINES = 12;
+constexpr int LIST_TOP_Y = 36;
+constexpr int LIST_BOTTOM_MARGIN = 22;
+constexpr int TODO_TEXT_X = 22;
+constexpr int TODO_MAX_LINES = 3;
+constexpr int TODO_LINE_HEIGHT = 16;
+constexpr int TODO_ROW_PADDING = 10;
 
 enum Page { PAGE_NEXT = 0, PAGE_TODAY, PAGE_TODO, PAGE_DEADLINE, PAGE_COUNT };
 
@@ -39,11 +45,17 @@ struct RowItem {
   String right;
 };
 
+struct TodoItem {
+  int id = 0;
+  bool completed = false;
+  String title;
+};
+
 struct FeedState {
   String generatedAt;
   NextItem next;
   RowItem today[MAX_TODAY];
-  RowItem todos[MAX_TODOS];
+  TodoItem todos[MAX_TODOS];
   RowItem deadlines[MAX_DEADLINES];
   size_t todayCount = 0;
   size_t todoCount = 0;
@@ -63,6 +75,9 @@ uint32_t lastPowerCheckAt = 0;
 bool sidePressed = false;
 bool sideLongHandled = false;
 uint32_t sidePressedAt = 0;
+int todoSelected = 0;
+int lastBatteryPercent = -1;
+bool lastUsbPowered = false;
 
 String httpUrlWithToken() {
   String url = FEED_URL;
@@ -120,6 +135,40 @@ void drawWrapped(const String &text, int x, int y, int width, int lineHeight, ui
   }
 }
 
+int countWrappedLines(const String &text, int width, int maxLines) {
+  if (maxLines <= 0) return 0;
+  if (text.isEmpty()) return 1;
+  String line;
+  int lines = 0;
+  for (int i = 0; i < text.length();) {
+    int len = nextUtf8Len(text, i);
+    String token = text.substring(i, i + len);
+    String candidate = line + token;
+    if (line.length() > 0 && M5.Display.textWidth(candidate) > width) {
+      lines++;
+      line = token;
+      if (lines >= maxLines) return lines;
+    } else {
+      line = candidate;
+    }
+    i += len;
+  }
+  if (line.length() > 0 && lines < maxLines) {
+    lines++;
+  }
+  return lines > 0 ? lines : 1;
+}
+
+String fitTextToWidth(const String &text, int maxWidth) {
+  if (maxWidth <= 0) return "";
+  if (M5.Display.textWidth(text) <= maxWidth) return text;
+  String trimmed = text;
+  while (trimmed.length() > 0 && M5.Display.textWidth(trimmed + "...") > maxWidth) {
+    trimmed.remove(trimmed.length() - 1);
+  }
+  return trimmed.length() ? trimmed + "..." : "";
+}
+
 String joinPeople(JsonArray people) {
   String joined;
   for (JsonVariant item : people) {
@@ -164,7 +213,11 @@ bool parseFeedJson(const String &json, bool fromCache) {
   JsonArray todos = doc["todos"].as<JsonArray>();
   for (JsonObject item : todos) {
     if (nextFeed.todoCount >= MAX_TODOS) break;
-    nextFeed.todos[nextFeed.todoCount++] = {"", item["title"] | ""};
+    TodoItem todo;
+    todo.id = item["id"] | 0;
+    todo.title = item["title"] | "";
+    todo.completed = item["completed"] | false;
+    nextFeed.todos[nextFeed.todoCount++] = todo;
   }
 
   JsonArray deadlines = doc["deadlines"].as<JsonArray>();
@@ -174,6 +227,12 @@ bool parseFeedJson(const String &json, bool fromCache) {
   }
 
   feed = nextFeed;
+  if (feed.todoCount == 0) {
+    todoSelected = 0;
+    scrollOffset[PAGE_TODO] = 0;
+  } else if (todoSelected >= static_cast<int>(feed.todoCount)) {
+    todoSelected = static_cast<int>(feed.todoCount) - 1;
+  }
   return true;
 }
 
@@ -200,8 +259,35 @@ bool isUsbPowered() {
   return M5.Power.isCharging() == m5::Power_Class::is_charging;
 }
 
+int readBatteryPercent() {
+  int level = M5.Power.getBatteryLevel();
+  if (level < 0) return -1;
+  if (level > 100) level = 100;
+  return level;
+}
+
+void updateBatteryStatus(bool usbPowered) {
+  lastUsbPowered = usbPowered;
+  if (usbPowered) {
+    lastBatteryPercent = 100;
+    return;
+  }
+  int level = readBatteryPercent();
+  if (level >= 0) {
+    lastBatteryPercent = level;
+  }
+}
+
+void drawLightningIcon(int x, int y, uint16_t color) {
+  M5.Display.drawLine(x + 4, y, x + 1, y + 5, color);
+  M5.Display.drawLine(x + 1, y + 5, x + 4, y + 5, color);
+  M5.Display.drawLine(x + 4, y + 5, x + 2, y + 10, color);
+}
+
 void applyPowerMode() {
-  M5.Display.setBrightness(isUsbPowered() ? USB_BRIGHTNESS : BATTERY_BRIGHTNESS);
+  bool usbPowered = isUsbPowered();
+  M5.Display.setBrightness(usbPowered ? USB_BRIGHTNESS : BATTERY_BRIGHTNESS);
+  updateBatteryStatus(usbPowered);
   lastPowerCheckAt = millis();
 }
 
@@ -301,9 +387,23 @@ size_t rowCountForPage(Page page) {
   }
 }
 
+int visibleRowsForPage(Page page) {
+  int top = LIST_TOP_Y;
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
+  int available = bottom - top;
+  int rowH = 28;
+  if (page == PAGE_TODO) {
+    rowH = TODO_MAX_LINES * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
+  }
+  if (rowH <= 0) return 1;
+  int visible = available / rowH;
+  return visible > 0 ? visible : 1;
+}
+
 void clampScroll(Page page) {
   size_t count = rowCountForPage(page);
-  int maxOffset = count > 6 ? static_cast<int>(count - 1) : 0;
+  int visible = visibleRowsForPage(page);
+  int maxOffset = count > static_cast<size_t>(visible) ? static_cast<int>(count - visible) : 0;
   if (scrollOffset[page] < 0) scrollOffset[page] = 0;
   if (scrollOffset[page] > maxOffset) scrollOffset[page] = maxOffset;
 }
@@ -311,13 +411,89 @@ void clampScroll(Page page) {
 void drawHeader() {
   M5.Display.fillRect(0, 0, M5.Display.width(), 28, TFT_BLACK);
   M5.Display.drawFastHLine(0, 27, M5.Display.width(), TFT_DARKGREY);
-  setFont(16);
-  M5.Display.setTextColor(TFT_WHITE);
-  M5.Display.drawString(pageTitle(currentPage), 6, 5);
   setFont(12);
   uint16_t statusColor = feed.online ? TFT_GREEN : (feed.fromCache ? TFT_ORANGE : TFT_RED);
-  M5.Display.setTextColor(statusColor);
-  M5.Display.drawString(feed.online ? "ON" : (feed.fromCache ? "CACHE" : "OFF"), M5.Display.width() - 46, 7);
+  String statusText = feed.online ? "ON" : (feed.fromCache ? "CACHE" : "OFF");
+  int statusWidth = M5.Display.textWidth(statusText);
+  int statusX = M5.Display.width() - statusWidth - 6;
+  int batteryPercent = lastBatteryPercent;
+  if (batteryPercent < 0 && lastUsbPowered) batteryPercent = 100;
+  bool showStatus = true;
+  bool showBattery = batteryPercent >= 0;
+  int boltW = (lastUsbPowered && showBattery) ? 6 : 0;
+  int boltGap = (lastUsbPowered && showBattery) ? 4 : 0;
+  String pctText = String(batteryPercent) + "%";
+  int pctWidth = showBattery ? M5.Display.textWidth(pctText) : 0;
+
+  auto calcRightLimit = [&](int &statusXOut, int &batteryXOut) {
+    int rightPadding = 6;
+    int rightLimit = M5.Display.width() - rightPadding;
+    statusXOut = -1;
+    batteryXOut = -1;
+    if (showStatus) {
+      statusXOut = M5.Display.width() - statusWidth - rightPadding;
+      rightLimit = statusXOut - 6;
+    }
+    if (showBattery) {
+      int batteryWidth = pctWidth + boltW + boltGap;
+      int batteryRight = showStatus ? (statusXOut - 8) : (M5.Display.width() - rightPadding);
+      batteryXOut = batteryRight - batteryWidth;
+      if (batteryXOut < 6) {
+        batteryXOut = -1;
+      } else {
+        rightLimit = min(rightLimit, batteryXOut - 6);
+      }
+    }
+    return rightLimit;
+  };
+
+  int batteryX = -1;
+  int rightLimit = calcRightLimit(statusX, batteryX);
+
+  setFont(16);
+  int titleWidth = M5.Display.textWidth(pageTitle(currentPage));
+  if (titleWidth > rightLimit - 6 && showBattery) {
+    showBattery = false;
+    boltW = 0;
+    boltGap = 0;
+    pctWidth = 0;
+    rightLimit = calcRightLimit(statusX, batteryX);
+  }
+  if (titleWidth > rightLimit - 6 && showStatus) {
+    showStatus = false;
+    rightLimit = calcRightLimit(statusX, batteryX);
+  }
+
+  uint8_t titleFont = 16;
+  if (titleWidth > rightLimit - 6) {
+    titleFont = 14;
+    setFont(titleFont);
+    titleWidth = M5.Display.textWidth(pageTitle(currentPage));
+  }
+  if (titleWidth > rightLimit - 6) {
+    titleFont = 12;
+    setFont(titleFont);
+  }
+
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.drawString(pageTitle(currentPage), 6, (titleFont == 12 ? 8 : 6));
+
+  setFont(12);
+  if (showStatus && statusX >= 0) {
+    M5.Display.setTextColor(statusColor);
+    M5.Display.drawString(statusText, statusX, 7);
+  }
+
+  if (showBattery && batteryX >= 0) {
+    uint16_t iconColor = lastUsbPowered ? TFT_GREEN : TFT_LIGHTGREY;
+    M5.Display.setTextColor(iconColor);
+    int textX = batteryX;
+    if (boltW > 0) {
+      drawLightningIcon(textX, 7, iconColor);
+      textX += boltW + boltGap;
+    }
+    M5.Display.drawString(pctText, textX, 7);
+  }
 }
 
 void drawFooter() {
@@ -347,14 +523,19 @@ void drawNextPage() {
   setFont(14);
   M5.Display.setTextColor(TFT_CYAN);
   M5.Display.drawString(feed.next.relative, 8, y);
+  y += 22;
 
-  int boxW = 58;
-  int boxH = 28;
-  int boxX = w - boxW - 8;
-  M5.Display.drawRoundRect(boxX, y - 5, boxW, boxH, 4, TFT_ORANGE);
+  setFont(16);
+  int boxH = 30;
+  int boxW = max(72, M5.Display.textWidth(feed.next.time) + 26);
+  int boxX = (w - boxW) / 2;
+  int boxY = y + 2;
+  M5.Display.drawRoundRect(boxX, boxY, boxW, boxH, 5, TFT_ORANGE);
   M5.Display.setTextColor(TFT_ORANGE);
-  M5.Display.drawString(feed.next.time, boxX + 9, y + 1);
-  y += 40;
+  int textW = M5.Display.textWidth(feed.next.time);
+  int textX = boxX + (boxW - textW) / 2;
+  M5.Display.drawString(feed.next.time, textX, boxY + 7);
+  y = boxY + boxH + 12;
 
   setFont(12);
   if (feed.next.people.length()) {
@@ -374,10 +555,10 @@ void drawRows(RowItem *items, size_t count, bool arrows, bool rightAligned) {
   }
 
   clampScroll(currentPage);
-  int y = 36;
+  int y = LIST_TOP_Y;
   int start = scrollOffset[currentPage];
   int rowH = 28;
-  int bottom = M5.Display.height() - 22;
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
   setFont(12);
   for (size_t i = start; i < count && y + rowH <= bottom; ++i) {
     M5.Display.drawFastHLine(0, y + rowH - 2, M5.Display.width(), TFT_DARKGREY);
@@ -402,6 +583,94 @@ void drawRows(RowItem *items, size_t count, bool arrows, bool rightAligned) {
   }
 }
 
+int todoTextWidth() {
+  return M5.Display.width() - TODO_TEXT_X - 6;
+}
+
+int todoRowHeight(const String &text) {
+  int lines = countWrappedLines(text, todoTextWidth(), TODO_MAX_LINES);
+  return lines * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
+}
+
+int lastVisibleTodoIndex(int start) {
+  if (feed.todoCount == 0) return -1;
+  setFont(12);
+  int y = LIST_TOP_Y;
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
+  int last = start - 1;
+  for (int i = start; i < static_cast<int>(feed.todoCount); ++i) {
+    int rowH = todoRowHeight(feed.todos[i].title);
+    if (y + rowH > bottom) break;
+    y += rowH;
+    last = i;
+  }
+  return last < start ? start : last;
+}
+
+void ensureTodoVisible() {
+  if (feed.todoCount == 0) {
+    scrollOffset[PAGE_TODO] = 0;
+    todoSelected = 0;
+    return;
+  }
+  if (todoSelected < 0) todoSelected = 0;
+  if (todoSelected >= static_cast<int>(feed.todoCount)) {
+    todoSelected = static_cast<int>(feed.todoCount) - 1;
+  }
+  if (todoSelected < scrollOffset[PAGE_TODO]) {
+    scrollOffset[PAGE_TODO] = todoSelected;
+    return;
+  }
+  int last = lastVisibleTodoIndex(scrollOffset[PAGE_TODO]);
+  if (todoSelected > last) {
+    scrollOffset[PAGE_TODO] = todoSelected;
+  }
+}
+
+void drawStrikeThrough(int x, int y, int width, int lines, int lineHeight, uint16_t color) {
+  for (int i = 0; i < lines; ++i) {
+    int yLine = y + i * lineHeight + lineHeight / 2;
+    M5.Display.drawFastHLine(x, yLine, width, color);
+  }
+}
+
+void drawTodoPage() {
+  if (feed.todoCount == 0) {
+    setFont(14);
+    drawWrapped("Empty", 8, 44, M5.Display.width() - 16, 18, TFT_LIGHTGREY, 2);
+    return;
+  }
+
+  clampScroll(PAGE_TODO);
+  ensureTodoVisible();
+  int y = LIST_TOP_Y;
+  int start = scrollOffset[PAGE_TODO];
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
+  setFont(12);
+  for (int i = start; i < static_cast<int>(feed.todoCount); ++i) {
+    int lines = countWrappedLines(feed.todos[i].title, todoTextWidth(), TODO_MAX_LINES);
+    int rowH = lines * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
+    if (y + rowH > bottom) break;
+    bool selected = (i == todoSelected);
+    uint16_t textColor = feed.todos[i].completed ? TFT_LIGHTGREY : TFT_WHITE;
+    if (selected) {
+      M5.Display.fillRect(0, y, M5.Display.width(), rowH, TFT_DARKGREY);
+      M5.Display.fillRect(0, y, 4, rowH, TFT_CYAN);
+    }
+    M5.Display.drawFastHLine(0, y + rowH - 2, M5.Display.width(), TFT_DARKGREY);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.drawString(">", 8, y + 5);
+    M5.Display.setTextColor(textColor);
+    int textY = y + 4;
+    drawWrapped(feed.todos[i].title, TODO_TEXT_X, textY, todoTextWidth(), TODO_LINE_HEIGHT, textColor,
+                TODO_MAX_LINES);
+    if (feed.todos[i].completed) {
+      drawStrikeThrough(TODO_TEXT_X, textY, todoTextWidth(), lines, TODO_LINE_HEIGHT, TFT_LIGHTGREY);
+    }
+    y += rowH;
+  }
+}
+
 void drawCurrentPage() {
   M5.Display.fillScreen(TFT_BLACK);
   drawHeader();
@@ -413,7 +682,7 @@ void drawCurrentPage() {
       drawRows(feed.today, feed.todayCount, false, false);
       break;
     case PAGE_TODO:
-      drawRows(feed.todos, feed.todoCount, true, false);
+      drawTodoPage();
       break;
     case PAGE_DEADLINE:
       drawRows(feed.deadlines, feed.deadlineCount, false, true);
@@ -427,6 +696,9 @@ void drawCurrentPage() {
 void nextPage() {
   currentPage = static_cast<Page>((static_cast<int>(currentPage) + 1) % PAGE_COUNT);
   scrollOffset[currentPage] = 0;
+  if (currentPage == PAGE_TODO) {
+    todoSelected = 0;
+  }
   drawCurrentPage();
 }
 
@@ -444,6 +716,46 @@ void scrollUp() {
   drawCurrentPage();
 }
 
+String deviceBaseUrl() {
+  String url = FEED_URL;
+  int index = url.indexOf("/api/device/");
+  if (index < 0) return url;
+  return url.substring(0, index) + "/api/device";
+}
+
+String deviceUrlWithToken(const String &path) {
+  String url = deviceBaseUrl() + path;
+  url += (url.indexOf('?') >= 0) ? "&token=" : "?token=";
+  url += DEVICE_TOKEN;
+  return url;
+}
+
+bool patchTodoCompleted(int id, bool completed) {
+  if (id <= 0) {
+    feed.message = completed ? "Marked done" : "Reopened";
+    return true;
+  }
+  if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
+    return false;
+  }
+  HTTPClient http;
+  String url = deviceUrlWithToken(String("/todos/") + String(id));
+  if (!http.begin(url)) {
+    feed.message = "HTTP begin failed";
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+  String payload = String("{\"completed\":") + (completed ? "true" : "false") + "}";
+  int code = http.sendRequest("PATCH", payload);
+  http.end();
+  if (code != HTTP_CODE_OK) {
+    feed.message = String("HTTP ") + code;
+    return false;
+  }
+  feed.message = completed ? "Marked done" : "Reopened";
+  return true;
+}
+
 void handleButtons() {
   M5.update();
   if (M5.BtnA.wasPressed()) {
@@ -458,11 +770,34 @@ void handleButtons() {
 
   if (sidePressed && M5.BtnB.isPressed() && !sideLongHandled && millis() - sidePressedAt >= LONG_PRESS_MS) {
     sideLongHandled = true;
-    scrollUp();
+    if (currentPage == PAGE_TODO) {
+      if (feed.todoCount > 0) {
+        TodoItem &item = feed.todos[todoSelected];
+        bool nextState = !item.completed;
+        item.completed = nextState;
+        drawCurrentPage();
+        if (!patchTodoCompleted(item.id, nextState)) {
+          feed.message = "Sync failed";
+        }
+        drawFooter();
+      }
+    } else {
+      scrollUp();
+    }
   }
 
   if (sidePressed && M5.BtnB.wasReleased()) {
-    if (!sideLongHandled) scrollDown();
+    if (!sideLongHandled) {
+      if (currentPage == PAGE_TODO) {
+        if (feed.todoCount > 0) {
+          todoSelected = (todoSelected + 1) % static_cast<int>(feed.todoCount);
+          ensureTodoVisible();
+          drawCurrentPage();
+        }
+      } else {
+        scrollDown();
+      }
+    }
     sidePressed = false;
   }
 }
