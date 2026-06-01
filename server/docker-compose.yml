@@ -8,4 +8,4 @@ services:
     ports:
       - "18080:18080"
     volumes:
-      - ./data:/data
+      - /var/lib/simple-day/data:/data
