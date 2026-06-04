@@ -19,6 +19,7 @@ class FeedTests(unittest.TestCase):
                 "starts_at": (now + timedelta(hours=10)).isoformat(),
                 "participants": "[]",
                 "location": "",
+                "category": "life",
             },
             {
                 "id": 2,
@@ -26,24 +27,44 @@ class FeedTests(unittest.TestCase):
                 "starts_at": (now + timedelta(hours=7)).isoformat(),
                 "participants": '["李小宇","小姜"]',
                 "location": "腾讯会议",
+                "category": "project",
             },
         ]
         todos = [
-            {"id": 1, "title": "open", "completed": 0},
-            {"id": 2, "title": "closed", "completed": 1},
+            {"id": 1, "title": "life open", "completed": 0, "category": "life"},
+            {
+                "id": 2,
+                "title": "project done",
+                "completed": 1,
+                "completed_at": now.isoformat(timespec="seconds"),
+                "category": "project",
+            },
+            {
+                "id": 3,
+                "title": "life old",
+                "completed": 1,
+                "completed_at": (now - timedelta(days=1)).isoformat(timespec="seconds"),
+                "category": "life",
+            },
+        ]
+        shopping = [
+            {"id": 1, "title": "milk", "completed": 0},
         ]
         deadlines = [
             {"id": 1, "title": "v1.0 simple 发布", "due_date": "2026-06-02", "completed": 0},
             {"id": 2, "title": "done", "due_date": "2026-06-01", "completed": 1},
         ]
 
-        feed = compose_feed(events, todos, deadlines, now=now)
+        feed = compose_feed(events, todos, shopping, deadlines, now=now)
 
-        self.assertEqual(feed["next"]["title"], "设计评审")
-        self.assertEqual(feed["next"]["time"], "16:00")
-        self.assertEqual(feed["next"]["with"], ["李小宇", "小姜"])
-        self.assertEqual([item["title"] for item in feed["today"]], ["设计评审", "晚饭"])
-        self.assertEqual(feed["todos"], [{"id": 1, "title": "open"}])
+        self.assertEqual(feed["life"]["next"]["title"], "晚饭")
+        self.assertEqual(feed["project"]["next"]["title"], "设计评审")
+        self.assertEqual(feed["project"]["next"]["time"], "16:00")
+        self.assertEqual(feed["project"]["next"]["with"], ["李小宇", "小姜"])
+        self.assertEqual([item["title"] for item in feed["life"]["today"]], ["晚饭"])
+        self.assertEqual(feed["life"]["todos"], [{"id": 1, "title": "life open", "completed": False}])
+        self.assertEqual(feed["project"]["todos"], [{"id": 2, "title": "project done", "completed": True}])
+        self.assertEqual(feed["life"]["shopping"], [{"id": 1, "title": "milk", "completed": False}])
         self.assertEqual(feed["deadlines"][0]["relative"], "in 2d")
 
     def test_relative_time_formats(self):

@@ -33,6 +33,7 @@ def init_db(conn=None):
             starts_at TEXT NOT NULL,
             participants TEXT NOT NULL DEFAULT '[]',
             location TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT 'life',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -40,7 +41,9 @@ def init_db(conn=None):
         CREATE TABLE IF NOT EXISTS todos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'life',
             completed INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -53,8 +56,21 @@ def init_db(conn=None):
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS shopping_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
+    ensure_column(conn, "events", "category", "TEXT NOT NULL DEFAULT 'life'")
+    ensure_column(conn, "todos", "category", "TEXT NOT NULL DEFAULT 'life'")
+    ensure_column(conn, "todos", "completed_at", "TEXT")
+    ensure_column(conn, "shopping_items", "completed_at", "TEXT")
     conn.commit()
     if own_conn:
         conn.close()
@@ -67,6 +83,18 @@ def rows(conn, sql, args=()):
 def one(conn, sql, args=()):
     row = conn.execute(sql, args).fetchone()
     return dict(row) if row else None
+
+
+def table_columns(conn, table):
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row[1] for row in rows}
+
+
+def ensure_column(conn, table, column, definition):
+    columns = table_columns(conn, table)
+    if column in columns:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def encode_participants(value):
@@ -83,6 +111,8 @@ def decode_event(row):
         row["participants"] = json.loads(row.get("participants") or "[]")
     except json.JSONDecodeError:
         row["participants"] = []
+    if not row.get("category"):
+        row["category"] = "life"
     return row
 
 
@@ -90,14 +120,15 @@ def insert_event(conn, data):
     stamp = iso_now()
     cur = conn.execute(
         """
-        INSERT INTO events (title, starts_at, participants, location, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO events (title, starts_at, participants, location, category, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             data["title"].strip(),
             data["starts_at"],
             encode_participants(data.get("participants")),
             (data.get("location") or "").strip(),
+            data.get("category") or "life",
             stamp,
             stamp,
         ),
@@ -115,11 +146,12 @@ def update_event(conn, item_id, data):
         "starts_at": data.get("starts_at", current["starts_at"]),
         "participants": data.get("participants", json.loads(current["participants"] or "[]")),
         "location": data.get("location", current["location"]),
+        "category": data.get("category", current.get("category") or "life"),
     }
     conn.execute(
         """
         UPDATE events
-        SET title = ?, starts_at = ?, participants = ?, location = ?, updated_at = ?
+        SET title = ?, starts_at = ?, participants = ?, location = ?, category = ?, updated_at = ?
         WHERE id = ?
         """,
         (
@@ -127,6 +159,7 @@ def update_event(conn, item_id, data):
             merged["starts_at"],
             encode_participants(merged.get("participants")),
             (merged.get("location") or "").strip(),
+            merged.get("category") or "life",
             iso_now(),
             item_id,
         ),
@@ -137,9 +170,21 @@ def update_event(conn, item_id, data):
 
 def insert_todo(conn, data):
     stamp = iso_now()
+    completed = bool(data.get("completed", False))
+    completed_at = stamp if completed else None
     cur = conn.execute(
-        "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        (data["title"].strip(), int(bool(data.get("completed", False))), stamp, stamp),
+        """
+        INSERT INTO todos (title, category, completed, completed_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            data["title"].strip(),
+            data.get("category") or "life",
+            int(completed),
+            completed_at,
+            stamp,
+            stamp,
+        ),
     )
     conn.commit()
     return one(conn, "SELECT * FROM todos WHERE id = ?", (cur.lastrowid,))
@@ -149,17 +194,74 @@ def update_todo(conn, item_id, data):
     current = one(conn, "SELECT * FROM todos WHERE id = ?", (item_id,))
     if not current:
         return None
+    next_completed = bool(data.get("completed", current["completed"]))
+    completed_at = current.get("completed_at")
+    if next_completed:
+        if not current["completed"] or not completed_at:
+            completed_at = iso_now()
+    else:
+        completed_at = None
     conn.execute(
-        "UPDATE todos SET title = ?, completed = ?, updated_at = ? WHERE id = ?",
+        """
+        UPDATE todos
+        SET title = ?, category = ?, completed = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
         (
             data.get("title", current["title"]).strip(),
-            int(bool(data.get("completed", current["completed"]))),
+            data.get("category", current.get("category") or "life"),
+            int(next_completed),
+            completed_at,
             iso_now(),
             item_id,
         ),
     )
     conn.commit()
     return one(conn, "SELECT * FROM todos WHERE id = ?", (item_id,))
+
+
+def insert_shopping(conn, data):
+    stamp = iso_now()
+    completed = bool(data.get("completed", False))
+    completed_at = stamp if completed else None
+    cur = conn.execute(
+        """
+        INSERT INTO shopping_items (title, completed, completed_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (data["title"].strip(), int(completed), completed_at, stamp, stamp),
+    )
+    conn.commit()
+    return one(conn, "SELECT * FROM shopping_items WHERE id = ?", (cur.lastrowid,))
+
+
+def update_shopping(conn, item_id, data):
+    current = one(conn, "SELECT * FROM shopping_items WHERE id = ?", (item_id,))
+    if not current:
+        return None
+    next_completed = bool(data.get("completed", current["completed"]))
+    completed_at = current.get("completed_at")
+    if next_completed:
+        if not current["completed"] or not completed_at:
+            completed_at = iso_now()
+    else:
+        completed_at = None
+    conn.execute(
+        """
+        UPDATE shopping_items
+        SET title = ?, completed = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            data.get("title", current["title"]).strip(),
+            int(next_completed),
+            completed_at,
+            iso_now(),
+            item_id,
+        ),
+    )
+    conn.commit()
+    return one(conn, "SELECT * FROM shopping_items WHERE id = ?", (item_id,))
 
 
 def insert_deadline(conn, data):

@@ -24,6 +24,7 @@ class EventIn(BaseModel):
     starts_at: str
     participants: list[str] = Field(default_factory=list)
     location: str = ""
+    category: str = "life"
 
 
 class EventPatch(BaseModel):
@@ -31,19 +32,36 @@ class EventPatch(BaseModel):
     starts_at: str | None = None
     participants: list[str] | None = None
     location: str | None = None
+    category: str | None = None
 
 
 class TodoIn(BaseModel):
     title: str
     completed: bool = False
+    category: str = "life"
 
 
 class TodoPatch(BaseModel):
     title: str | None = None
     completed: bool | None = None
+    category: str | None = None
 
 
 class DeviceTodoPatch(BaseModel):
+    completed: bool
+
+
+class ShoppingIn(BaseModel):
+    title: str
+    completed: bool = False
+
+
+class ShoppingPatch(BaseModel):
+    title: str | None = None
+    completed: bool | None = None
+
+
+class DeviceShoppingPatch(BaseModel):
     completed: bool
 
 
@@ -93,6 +111,13 @@ def validate_title(title):
     return title.strip()
 
 
+def normalize_category(value):
+    text = str(value or "life").strip().lower()
+    if text not in {"life", "project"}:
+        raise HTTPException(status_code=422, detail="category must be life or project")
+    return text
+
+
 @app.on_event("startup")
 def startup():
     db.init_db()
@@ -115,12 +140,14 @@ def list_items(conn=Depends(get_conn), _=Depends(require_admin)):
     events = [db.decode_event(row) for row in db.rows(conn, "SELECT * FROM events ORDER BY starts_at, id")]
     todos = db.rows(conn, "SELECT * FROM todos ORDER BY completed, id")
     deadlines = db.rows(conn, "SELECT * FROM deadlines ORDER BY completed, due_date, id")
-    return {"events": events, "todos": todos, "deadlines": deadlines}
+    shopping = db.rows(conn, "SELECT * FROM shopping_items ORDER BY completed, id")
+    return {"events": events, "todos": todos, "deadlines": deadlines, "shopping": shopping}
 
 
 @app.post("/api/events")
 def create_event(payload: EventIn, conn=Depends(get_conn), _=Depends(require_admin)):
     validate_title(payload.title)
+    payload.category = normalize_category(payload.category)
     try:
         parse_datetime(payload.starts_at)
     except ValueError as exc:
@@ -133,6 +160,8 @@ def patch_event(item_id: int, payload: EventPatch, conn=Depends(get_conn), _=Dep
     data = model_dict(payload, exclude_unset=True)
     if "title" in data:
         validate_title(data["title"])
+    if "category" in data:
+        data["category"] = normalize_category(data["category"])
     if "starts_at" in data:
         try:
             parse_datetime(data["starts_at"])
@@ -154,6 +183,7 @@ def delete_event(item_id: int, conn=Depends(get_conn), _=Depends(require_admin))
 @app.post("/api/todos")
 def create_todo(payload: TodoIn, conn=Depends(get_conn), _=Depends(require_admin)):
     validate_title(payload.title)
+    payload.category = normalize_category(payload.category)
     return db.insert_todo(conn, model_dict(payload))
 
 
@@ -162,6 +192,8 @@ def patch_todo(item_id: int, payload: TodoPatch, conn=Depends(get_conn), _=Depen
     data = model_dict(payload, exclude_unset=True)
     if "title" in data:
         validate_title(data["title"])
+    if "category" in data:
+        data["category"] = normalize_category(data["category"])
     updated = db.update_todo(conn, item_id, data)
     if not updated:
         raise HTTPException(status_code=404, detail="todo not found")
@@ -171,6 +203,30 @@ def patch_todo(item_id: int, payload: TodoPatch, conn=Depends(get_conn), _=Depen
 @app.delete("/api/todos/{item_id}")
 def delete_todo(item_id: int, conn=Depends(get_conn), _=Depends(require_admin)):
     conn.execute("DELETE FROM todos WHERE id = ?", (item_id,))
+    conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/shopping")
+def create_shopping(payload: ShoppingIn, conn=Depends(get_conn), _=Depends(require_admin)):
+    validate_title(payload.title)
+    return db.insert_shopping(conn, model_dict(payload))
+
+
+@app.patch("/api/shopping/{item_id}")
+def patch_shopping(item_id: int, payload: ShoppingPatch, conn=Depends(get_conn), _=Depends(require_admin)):
+    data = model_dict(payload, exclude_unset=True)
+    if "title" in data:
+        validate_title(data["title"])
+    updated = db.update_shopping(conn, item_id, data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="shopping item not found")
+    return updated
+
+
+@app.delete("/api/shopping/{item_id}")
+def delete_shopping(item_id: int, conn=Depends(get_conn), _=Depends(require_admin)):
+    conn.execute("DELETE FROM shopping_items WHERE id = ?", (item_id,))
     conn.commit()
     return {"ok": True}
 
@@ -214,8 +270,9 @@ def device_feed(token: str = Query(default=""), conn=Depends(get_conn)):
         raise HTTPException(status_code=401, detail="invalid device token")
     events = db.rows(conn, "SELECT * FROM events ORDER BY starts_at, id")
     todos = db.rows(conn, "SELECT * FROM todos ORDER BY id")
+    shopping = db.rows(conn, "SELECT * FROM shopping_items ORDER BY id")
     deadlines = db.rows(conn, "SELECT * FROM deadlines ORDER BY due_date, id")
-    return compose_feed(events, todos, deadlines)
+    return compose_feed(events, todos, shopping, deadlines)
 
 
 @app.patch("/api/device/todos/{item_id}")
@@ -230,4 +287,19 @@ def patch_device_todo(
     updated = db.update_todo(conn, item_id, {"completed": payload.completed})
     if not updated:
         raise HTTPException(status_code=404, detail="todo not found")
+    return updated
+
+
+@app.patch("/api/device/shopping/{item_id}")
+def patch_device_shopping(
+    item_id: int,
+    payload: DeviceShoppingPatch,
+    token: str = Query(default=""),
+    conn=Depends(get_conn),
+):
+    if token != device_token():
+        raise HTTPException(status_code=401, detail="invalid device token")
+    updated = db.update_shopping(conn, item_id, {"completed": payload.completed})
+    if not updated:
+        raise HTTPException(status_code=404, detail="shopping item not found")
     return updated

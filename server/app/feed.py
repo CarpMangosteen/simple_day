@@ -106,9 +106,36 @@ def _event_payload(row, now):
     }
 
 
-def compose_feed(events, todos, deadlines, now=None):
-    now = now or now_in_timezone()
+def category_of(row):
+    return str(row.get("category") or "life").strip().lower() or "life"
 
+
+def completed_today(item, now):
+    completed_at = item.get("completed_at")
+    if not completed_at:
+        return False
+    try:
+        return parse_datetime(completed_at).date() == now.date()
+    except ValueError:
+        return False
+
+
+def build_checklist_payload(rows, now):
+    payload = []
+    for row in rows:
+        item = dict(row)
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        completed = bool(int(item.get("completed") or 0))
+        if completed and not completed_today(item, now):
+            continue
+        payload.append({"id": item.get("id"), "title": title, "completed": completed})
+    payload.sort(key=lambda item: (item.get("completed", False), item.get("id") or 0))
+    return payload
+
+
+def build_event_bucket(events, now):
     active_events = []
     for row in events:
         try:
@@ -124,16 +151,22 @@ def compose_feed(events, todos, deadlines, now=None):
 
     next_event = _event_payload(future_events[0], now) if future_events else None
     today_payload = [_event_payload(row, now) for row in today_events]
+    return next_event, today_payload
 
-    todo_payload = []
-    for row in todos:
-        item = dict(row)
-        title = str(item.get("title", "")).strip()
-        if not title:
-            continue
-        completed = bool(int(item.get("completed") or 0))
-        todo_payload.append({"id": item.get("id"), "title": title, "completed": completed})
-    todo_payload.sort(key=lambda item: (item.get("completed", False), item.get("id") or 0))
+
+def compose_feed(events, todos, shopping, deadlines, now=None):
+    now = now or now_in_timezone()
+    life_events = [row for row in events if category_of(row) == "life"]
+    project_events = [row for row in events if category_of(row) == "project"]
+    life_todos = [row for row in todos if category_of(row) == "life"]
+    project_todos = [row for row in todos if category_of(row) == "project"]
+
+    life_next, life_today = build_event_bucket(life_events, now)
+    project_next, project_today = build_event_bucket(project_events, now)
+
+    life_todo_payload = build_checklist_payload(life_todos, now)
+    project_todo_payload = build_checklist_payload(project_todos, now)
+    shopping_payload = build_checklist_payload(shopping, now)
 
     deadline_payload = []
     for row in deadlines:
@@ -160,9 +193,17 @@ def compose_feed(events, todos, deadlines, now=None):
     return {
         "generated_at": now.isoformat(timespec="seconds"),
         "timezone": "Asia/Shanghai",
-        "next": next_event,
-        "today": today_payload,
-        "todos": todo_payload,
+        "life": {
+            "next": life_next,
+            "today": life_today,
+            "todos": life_todo_payload,
+            "shopping": shopping_payload,
+        },
+        "project": {
+            "next": project_next,
+            "today": project_today,
+            "todos": project_todo_payload,
+        },
         "deadlines": deadline_payload,
     }
 
@@ -177,6 +218,7 @@ def sample_feed(now=None):
                 "starts_at": (now + timedelta(hours=7)).isoformat(timespec="seconds"),
                 "participants": ["李小宇", "小姜"],
                 "location": "腾讯会议",
+                "category": "project",
             },
             {
                 "id": 2,
@@ -184,9 +226,11 @@ def sample_feed(now=None):
                 "starts_at": now.replace(hour=10, minute=0).isoformat(timespec="seconds"),
                 "participants": [],
                 "location": "",
+                "category": "life",
             },
         ],
-        [{"id": 1, "title": "整理 Simple Day UI 草稿", "completed": 0}],
+        [{"id": 1, "title": "整理 Simple Day UI 草稿", "completed": 0, "category": "project"}],
+        [{"id": 1, "title": "牛奶", "completed": 0}],
         [
             {
                 "id": 1,

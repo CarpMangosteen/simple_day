@@ -55,12 +55,24 @@ class ApiTests(unittest.TestCase):
                 "starts_at": future_start.isoformat(timespec="minutes"),
                 "participants": ["李小宇", "小姜"],
                 "location": "腾讯会议",
+                "category": "project",
             },
         )
         self.assertEqual(event.status_code, 200)
 
-        todo = self.client.post("/api/todos", headers=self.admin_headers, json={"title": "整理草稿"})
+        todo = self.client.post(
+            "/api/todos",
+            headers=self.admin_headers,
+            json={"title": "整理草稿", "category": "life"},
+        )
         self.assertEqual(todo.status_code, 200)
+
+        shopping = self.client.post(
+            "/api/shopping",
+            headers=self.admin_headers,
+            json={"title": "牛奶"},
+        )
+        self.assertEqual(shopping.status_code, 200)
 
         deadline = self.client.post(
             "/api/deadlines",
@@ -75,8 +87,9 @@ class ApiTests(unittest.TestCase):
         feed = self.client.get("/api/device/feed?token=device-test")
         self.assertEqual(feed.status_code, 200)
         payload = feed.json()
-        self.assertEqual(payload["next"]["title"], "设计评审")
-        self.assertEqual(payload["todos"][0]["title"], "整理草稿")
+        self.assertEqual(payload["project"]["next"]["title"], "设计评审")
+        self.assertEqual(payload["life"]["todos"][0]["title"], "整理草稿")
+        self.assertEqual(payload["life"]["shopping"][0]["title"], "牛奶")
         self.assertEqual(payload["deadlines"][0]["title"], "v1.0 simple 发布")
 
 

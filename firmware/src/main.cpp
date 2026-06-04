@@ -22,6 +22,7 @@ constexpr uint8_t USB_BRIGHTNESS = 120;
 constexpr uint8_t BATTERY_BRIGHTNESS = 70;
 constexpr size_t MAX_TODAY = 10;
 constexpr size_t MAX_TODOS = 14;
+constexpr size_t MAX_SHOPPING = 12;
 constexpr size_t MAX_DEADLINES = 12;
 constexpr int LIST_TOP_Y = 36;
 constexpr int LIST_BOTTOM_MARGIN = 22;
@@ -30,7 +31,8 @@ constexpr int TODO_MAX_LINES = 3;
 constexpr int TODO_LINE_HEIGHT = 16;
 constexpr int TODO_ROW_PADDING = 10;
 
-enum Page { PAGE_NEXT = 0, PAGE_TODAY, PAGE_TODO, PAGE_DEADLINE, PAGE_COUNT };
+enum Page { PAGE_NEXT = 0, PAGE_TODAY, PAGE_TODO, PAGE_SHOPPING, PAGE_DEADLINE, PAGE_COUNT };
+enum WindowMode { MODE_LIFE = 0, MODE_PROJECT, MODE_COUNT };
 
 struct NextItem {
   String title;
@@ -51,16 +53,29 @@ struct TodoItem {
   String title;
 };
 
-struct FeedState {
-  String generatedAt;
+struct ShoppingItem {
+  int id = 0;
+  bool completed = false;
+  String title;
+};
+
+struct FeedBucket {
   NextItem next;
   RowItem today[MAX_TODAY];
   TodoItem todos[MAX_TODOS];
-  RowItem deadlines[MAX_DEADLINES];
+  ShoppingItem shopping[MAX_SHOPPING];
   size_t todayCount = 0;
   size_t todoCount = 0;
-  size_t deadlineCount = 0;
+  size_t shoppingCount = 0;
   bool hasNext = false;
+};
+
+struct FeedState {
+  String generatedAt;
+  FeedBucket life;
+  FeedBucket project;
+  RowItem deadlines[MAX_DEADLINES];
+  size_t deadlineCount = 0;
   bool online = false;
   bool fromCache = false;
   String message = "Booting";
@@ -68,14 +83,19 @@ struct FeedState {
 
 Preferences prefs;
 FeedState feed;
+WindowMode currentMode = MODE_LIFE;
 Page currentPage = PAGE_NEXT;
-int scrollOffset[PAGE_COUNT] = {0, 0, 0, 0};
+int scrollOffset[MODE_COUNT][PAGE_COUNT] = {};
 uint32_t lastRefreshAt = 0;
 uint32_t lastPowerCheckAt = 0;
 bool sidePressed = false;
 bool sideLongHandled = false;
 uint32_t sidePressedAt = 0;
-int todoSelected = 0;
+bool aPressed = false;
+bool aLongHandled = false;
+uint32_t aPressedAt = 0;
+int todoSelected[MODE_COUNT] = {0, 0};
+int shoppingSelected[MODE_COUNT] = {0, 0};
 int lastBatteryPercent = -1;
 bool lastUsbPowered = false;
 
@@ -169,6 +189,41 @@ String fitTextToWidth(const String &text, int maxWidth) {
   return trimmed.length() ? trimmed + "..." : "";
 }
 
+const Page LIFE_PAGES[] = {PAGE_NEXT, PAGE_TODAY, PAGE_TODO, PAGE_SHOPPING, PAGE_DEADLINE};
+const Page PROJECT_PAGES[] = {PAGE_NEXT, PAGE_TODAY, PAGE_TODO, PAGE_DEADLINE};
+
+int modeIndex(WindowMode mode) {
+  return static_cast<int>(mode);
+}
+
+int pageCountForMode(WindowMode mode) {
+  return mode == MODE_LIFE ? static_cast<int>(sizeof(LIFE_PAGES) / sizeof(Page))
+                            : static_cast<int>(sizeof(PROJECT_PAGES) / sizeof(Page));
+}
+
+Page pageAtIndex(WindowMode mode, int index) {
+  if (mode == MODE_LIFE) {
+    return LIFE_PAGES[index % pageCountForMode(mode)];
+  }
+  return PROJECT_PAGES[index % pageCountForMode(mode)];
+}
+
+int pageIndexForMode(WindowMode mode, Page page) {
+  int count = pageCountForMode(mode);
+  for (int i = 0; i < count; ++i) {
+    if (pageAtIndex(mode, i) == page) return i;
+  }
+  return 0;
+}
+
+FeedBucket &bucketForMode(WindowMode mode) {
+  return mode == MODE_LIFE ? feed.life : feed.project;
+}
+
+FeedBucket &currentBucket() {
+  return bucketForMode(currentMode);
+}
+
 String joinPeople(JsonArray people) {
   String joined;
   for (JsonVariant item : people) {
@@ -180,6 +235,46 @@ String joinPeople(JsonArray people) {
   return joined;
 }
 
+void parseBucket(JsonObject obj, FeedBucket &bucket) {
+  if (obj.isNull()) return;
+
+  JsonObject nextObj = obj["next"].as<JsonObject>();
+  if (!nextObj.isNull()) {
+    bucket.hasNext = true;
+    bucket.next.title = nextObj["title"] | "";
+    bucket.next.relative = nextObj["relative"] | "";
+    bucket.next.time = nextObj["time"] | "";
+    bucket.next.where = nextObj["where"] | "";
+    bucket.next.people = joinPeople(nextObj["with"].as<JsonArray>());
+  }
+
+  JsonArray today = obj["today"].as<JsonArray>();
+  for (JsonObject item : today) {
+    if (bucket.todayCount >= MAX_TODAY) break;
+    bucket.today[bucket.todayCount++] = {item["time"] | "", item["title"] | ""};
+  }
+
+  JsonArray todos = obj["todos"].as<JsonArray>();
+  for (JsonObject item : todos) {
+    if (bucket.todoCount >= MAX_TODOS) break;
+    TodoItem todo;
+    todo.id = item["id"] | 0;
+    todo.title = item["title"] | "";
+    todo.completed = item["completed"] | false;
+    bucket.todos[bucket.todoCount++] = todo;
+  }
+
+  JsonArray shopping = obj["shopping"].as<JsonArray>();
+  for (JsonObject item : shopping) {
+    if (bucket.shoppingCount >= MAX_SHOPPING) break;
+    ShoppingItem shop;
+    shop.id = item["id"] | 0;
+    shop.title = item["title"] | "";
+    shop.completed = item["completed"] | false;
+    bucket.shopping[bucket.shoppingCount++] = shop;
+  }
+}
+
 bool parseFeedJson(const String &json, bool fromCache) {
   DynamicJsonDocument doc(16384);
   DeserializationError err = deserializeJson(doc, json);
@@ -188,37 +283,17 @@ bool parseFeedJson(const String &json, bool fromCache) {
     return false;
   }
 
-  FeedState nextFeed;
+  FeedState nextFeed{};
   nextFeed.generatedAt = doc["generated_at"] | "";
   nextFeed.online = !fromCache;
   nextFeed.fromCache = fromCache;
   nextFeed.message = fromCache ? "Cached" : "Updated";
 
-  JsonObject nextObj = doc["next"].as<JsonObject>();
-  if (!nextObj.isNull()) {
-    nextFeed.hasNext = true;
-    nextFeed.next.title = nextObj["title"] | "";
-    nextFeed.next.relative = nextObj["relative"] | "";
-    nextFeed.next.time = nextObj["time"] | "";
-    nextFeed.next.where = nextObj["where"] | "";
-    nextFeed.next.people = joinPeople(nextObj["with"].as<JsonArray>());
-  }
+  JsonObject lifeObj = doc["life"].as<JsonObject>();
+  parseBucket(lifeObj, nextFeed.life);
 
-  JsonArray today = doc["today"].as<JsonArray>();
-  for (JsonObject item : today) {
-    if (nextFeed.todayCount >= MAX_TODAY) break;
-    nextFeed.today[nextFeed.todayCount++] = {item["time"] | "", item["title"] | ""};
-  }
-
-  JsonArray todos = doc["todos"].as<JsonArray>();
-  for (JsonObject item : todos) {
-    if (nextFeed.todoCount >= MAX_TODOS) break;
-    TodoItem todo;
-    todo.id = item["id"] | 0;
-    todo.title = item["title"] | "";
-    todo.completed = item["completed"] | false;
-    nextFeed.todos[nextFeed.todoCount++] = todo;
-  }
+  JsonObject projectObj = doc["project"].as<JsonObject>();
+  parseBucket(projectObj, nextFeed.project);
 
   JsonArray deadlines = doc["deadlines"].as<JsonArray>();
   for (JsonObject item : deadlines) {
@@ -227,11 +302,25 @@ bool parseFeedJson(const String &json, bool fromCache) {
   }
 
   feed = nextFeed;
-  if (feed.todoCount == 0) {
-    todoSelected = 0;
-    scrollOffset[PAGE_TODO] = 0;
-  } else if (todoSelected >= static_cast<int>(feed.todoCount)) {
-    todoSelected = static_cast<int>(feed.todoCount) - 1;
+  for (int mode = 0; mode < MODE_COUNT; ++mode) {
+    FeedBucket &bucket = bucketForMode(static_cast<WindowMode>(mode));
+    if (bucket.todoCount == 0) {
+      todoSelected[mode] = 0;
+      scrollOffset[mode][PAGE_TODO] = 0;
+    } else if (todoSelected[mode] >= static_cast<int>(bucket.todoCount)) {
+      todoSelected[mode] = static_cast<int>(bucket.todoCount) - 1;
+    }
+
+    if (bucket.shoppingCount == 0) {
+      shoppingSelected[mode] = 0;
+      scrollOffset[mode][PAGE_SHOPPING] = 0;
+    } else if (shoppingSelected[mode] >= static_cast<int>(bucket.shoppingCount)) {
+      shoppingSelected[mode] = static_cast<int>(bucket.shoppingCount) - 1;
+    }
+  }
+
+  if (currentMode == MODE_PROJECT && currentPage == PAGE_SHOPPING) {
+    currentPage = PAGE_NEXT;
   }
   return true;
 }
@@ -239,14 +328,18 @@ bool parseFeedJson(const String &json, bool fromCache) {
 String sampleJson() {
   return F(
       "{\"generated_at\":\"2026-05-31T09:00:00+08:00\",\"timezone\":\"Asia/Shanghai\","
-      "\"next\":{\"title\":\"\\u8bbe\\u8ba1\\u8bc4\\u5ba1\",\"starts_at\":\"2026-05-31T16:00:00+08:00\","
-      "\"time\":\"16:00\",\"relative\":\"in 7h\",\"with\":[\"\\u674e\\u5c0f\\u5b87\",\"\\u5c0f\\u59dc\"],"
-      "\"where\":\"\\u817e\\u8baf\\u4f1a\\u8bae\"},"
-      "\"today\":[{\"time\":\"10:00\",\"title\":\"\\u6668\\u4f1a\"},"
-      "{\"time\":\"16:00\",\"title\":\"\\u8bbe\\u8ba1\\u8bc4\\u5ba1\"},"
-      "{\"time\":\"19:00\",\"title\":\"\\u665a\\u996d\"}],"
-      "\"todos\":[{\"title\":\"\\u6574\\u7406 Simple Day UI \\u8349\\u7a3f\"},"
-      "{\"title\":\"\\u786e\\u8ba4\\u670d\\u52a1\\u5668\\u7aef\\u53e3\\u5f00\\u653e\"}],"
+  "\"life\":{"
+  "\"next\":{\"title\":\"\\u6668\\u4f1a\",\"starts_at\":\"2026-05-31T10:00:00+08:00\","
+  "\"time\":\"10:00\",\"relative\":\"in 1h\",\"with\":[],\"where\":\"\"},"
+  "\"today\":[{\"time\":\"10:00\",\"title\":\"\\u6668\\u4f1a\"}],"
+  "\"todos\":[{\"id\":1,\"title\":\"\\u6574\\u7406 \\u751f\\u6d3b TODO\",\"completed\":false}],"
+  "\"shopping\":[{\"id\":1,\"title\":\"\\u725b\\u5976\",\"completed\":false}]},"
+  "\"project\":{"
+  "\"next\":{\"title\":\"\\u8bbe\\u8ba1\\u8bc4\\u5ba1\",\"starts_at\":\"2026-05-31T16:00:00+08:00\","
+  "\"time\":\"16:00\",\"relative\":\"in 7h\",\"with\":[\"\\u674e\\u5c0f\\u5b87\",\"\\u5c0f\\u59dc\"],"
+  "\"where\":\"\\u817e\\u8baf\\u4f1a\\u8bae\"},"
+  "\"today\":[{\"time\":\"16:00\",\"title\":\"\\u8bbe\\u8ba1\\u8bc4\\u5ba1\"}],"
+  "\"todos\":[{\"id\":2,\"title\":\"\\u786e\\u8ba4 \\u670d\\u52a1\\u5668\\u7aef\\u53e3\",\"completed\":false}]},"
       "\"deadlines\":[{\"title\":\"v1.0 simple \\u53d1\\u5e03\",\"relative\":\"in 2d\"},"
       "{\"title\":\"\\u516d\\u6708\\u9884\\u7b97\\u6574\\u7406\",\"relative\":\"in 5d\"},"
       "{\"title\":\"\\u79df\\u623f\\u5408\\u540c\\u5230\\u671f\",\"relative\":\"in 3w\"},"
@@ -282,6 +375,11 @@ void drawLightningIcon(int x, int y, uint16_t color) {
   M5.Display.drawLine(x + 4, y, x + 1, y + 5, color);
   M5.Display.drawLine(x + 1, y + 5, x + 4, y + 5, color);
   M5.Display.drawLine(x + 4, y + 5, x + 2, y + 10, color);
+}
+
+void drawModeIndicator() {
+  uint16_t color = currentMode == MODE_PROJECT ? TFT_NAVY : TFT_DARKGREEN;
+  M5.Display.fillCircle(3, 14, 2, color);
 }
 
 void applyPowerMode() {
@@ -373,15 +471,18 @@ const char *pageTitle(Page page) {
     case PAGE_NEXT: return "NEXT";
     case PAGE_TODAY: return "TODAY";
     case PAGE_TODO: return "TODO";
+    case PAGE_SHOPPING: return "SHOPPING";
     case PAGE_DEADLINE: return "DEADLINE";
     default: return "";
   }
 }
 
 size_t rowCountForPage(Page page) {
+  FeedBucket &bucket = currentBucket();
   switch (page) {
-    case PAGE_TODAY: return feed.todayCount;
-    case PAGE_TODO: return feed.todoCount;
+    case PAGE_TODAY: return bucket.todayCount;
+    case PAGE_TODO: return bucket.todoCount;
+    case PAGE_SHOPPING: return currentMode == MODE_LIFE ? bucket.shoppingCount : 0;
     case PAGE_DEADLINE: return feed.deadlineCount;
     default: return 0;
   }
@@ -392,7 +493,7 @@ int visibleRowsForPage(Page page) {
   int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
   int available = bottom - top;
   int rowH = 28;
-  if (page == PAGE_TODO) {
+  if (page == PAGE_TODO || page == PAGE_SHOPPING) {
     rowH = TODO_MAX_LINES * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
   }
   if (rowH <= 0) return 1;
@@ -401,16 +502,18 @@ int visibleRowsForPage(Page page) {
 }
 
 void clampScroll(Page page) {
+  int mode = modeIndex(currentMode);
   size_t count = rowCountForPage(page);
   int visible = visibleRowsForPage(page);
   int maxOffset = count > static_cast<size_t>(visible) ? static_cast<int>(count - visible) : 0;
-  if (scrollOffset[page] < 0) scrollOffset[page] = 0;
-  if (scrollOffset[page] > maxOffset) scrollOffset[page] = maxOffset;
+  if (scrollOffset[mode][page] < 0) scrollOffset[mode][page] = 0;
+  if (scrollOffset[mode][page] > maxOffset) scrollOffset[mode][page] = maxOffset;
 }
 
 void drawHeader() {
   M5.Display.fillRect(0, 0, M5.Display.width(), 28, TFT_BLACK);
   M5.Display.drawFastHLine(0, 27, M5.Display.width(), TFT_DARKGREY);
+  drawModeIndicator();
   setFont(12);
   uint16_t statusColor = feed.online ? TFT_GREEN : (feed.fromCache ? TFT_ORANGE : TFT_RED);
   String statusText = feed.online ? "ON" : (feed.fromCache ? "CACHE" : "OFF");
@@ -503,47 +606,49 @@ void drawFooter() {
   String text = feed.message;
   if (text.length() > 18) text = text.substring(0, 18);
   M5.Display.drawString(text, 6, M5.Display.height() - 15);
-  String page = String(static_cast<int>(currentPage) + 1) + "/4";
+  int index = pageIndexForMode(currentMode, currentPage);
+  String page = String(index + 1) + "/" + String(pageCountForMode(currentMode));
   M5.Display.drawString(page, M5.Display.width() - 30, M5.Display.height() - 15);
 }
 
 void drawNextPage() {
   const int w = M5.Display.width();
   int y = 38;
-  if (!feed.hasNext) {
+  FeedBucket &bucket = currentBucket();
+  if (!bucket.hasNext) {
     setFont(16);
     drawWrapped("No upcoming event", 8, y, w - 16, 20, TFT_LIGHTGREY, 4);
     return;
   }
 
   setFont(16);
-  drawWrapped(feed.next.title, 8, y, w - 16, 21, TFT_WHITE, 3);
+  drawWrapped(bucket.next.title, 8, y, w - 16, 21, TFT_WHITE, 3);
   y += 66;
 
   setFont(14);
   M5.Display.setTextColor(TFT_CYAN);
-  M5.Display.drawString(feed.next.relative, 8, y);
+  M5.Display.drawString(bucket.next.relative, 8, y);
   y += 22;
 
   setFont(16);
   int boxH = 30;
-  int boxW = max(72, M5.Display.textWidth(feed.next.time) + 26);
+  int boxW = max(72, M5.Display.textWidth(bucket.next.time) + 26);
   int boxX = (w - boxW) / 2;
   int boxY = y + 2;
   M5.Display.drawRoundRect(boxX, boxY, boxW, boxH, 5, TFT_ORANGE);
   M5.Display.setTextColor(TFT_ORANGE);
-  int textW = M5.Display.textWidth(feed.next.time);
+  int textW = M5.Display.textWidth(bucket.next.time);
   int textX = boxX + (boxW - textW) / 2;
-  M5.Display.drawString(feed.next.time, textX, boxY + 7);
+  M5.Display.drawString(bucket.next.time, textX, boxY + 7);
   y = boxY + boxH + 12;
 
   setFont(12);
-  if (feed.next.people.length()) {
-    drawWrapped(String("with ") + feed.next.people, 8, y, w - 16, 16, TFT_LIGHTGREY, 2);
+  if (bucket.next.people.length()) {
+    drawWrapped(String("with ") + bucket.next.people, 8, y, w - 16, 16, TFT_LIGHTGREY, 2);
     y += 34;
   }
-  if (feed.next.where.length()) {
-    drawWrapped(feed.next.where, 8, y, w - 16, 16, TFT_LIGHTGREY, 2);
+  if (bucket.next.where.length()) {
+    drawWrapped(bucket.next.where, 8, y, w - 16, 16, TFT_LIGHTGREY, 2);
   }
 }
 
@@ -556,7 +661,7 @@ void drawRows(RowItem *items, size_t count, bool arrows, bool rightAligned) {
 
   clampScroll(currentPage);
   int y = LIST_TOP_Y;
-  int start = scrollOffset[currentPage];
+  int start = scrollOffset[modeIndex(currentMode)][currentPage];
   int rowH = 28;
   int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
   setFont(12);
@@ -593,13 +698,14 @@ int todoRowHeight(const String &text) {
 }
 
 int lastVisibleTodoIndex(int start) {
-  if (feed.todoCount == 0) return -1;
+  FeedBucket &bucket = currentBucket();
+  if (bucket.todoCount == 0) return -1;
   setFont(12);
   int y = LIST_TOP_Y;
   int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
   int last = start - 1;
-  for (int i = start; i < static_cast<int>(feed.todoCount); ++i) {
-    int rowH = todoRowHeight(feed.todos[i].title);
+  for (int i = start; i < static_cast<int>(bucket.todoCount); ++i) {
+    int rowH = todoRowHeight(bucket.todos[i].title);
     if (y + rowH > bottom) break;
     y += rowH;
     last = i;
@@ -608,22 +714,24 @@ int lastVisibleTodoIndex(int start) {
 }
 
 void ensureTodoVisible() {
-  if (feed.todoCount == 0) {
-    scrollOffset[PAGE_TODO] = 0;
-    todoSelected = 0;
+  int mode = modeIndex(currentMode);
+  FeedBucket &bucket = currentBucket();
+  if (bucket.todoCount == 0) {
+    scrollOffset[mode][PAGE_TODO] = 0;
+    todoSelected[mode] = 0;
     return;
   }
-  if (todoSelected < 0) todoSelected = 0;
-  if (todoSelected >= static_cast<int>(feed.todoCount)) {
-    todoSelected = static_cast<int>(feed.todoCount) - 1;
+  if (todoSelected[mode] < 0) todoSelected[mode] = 0;
+  if (todoSelected[mode] >= static_cast<int>(bucket.todoCount)) {
+    todoSelected[mode] = static_cast<int>(bucket.todoCount) - 1;
   }
-  if (todoSelected < scrollOffset[PAGE_TODO]) {
-    scrollOffset[PAGE_TODO] = todoSelected;
+  if (todoSelected[mode] < scrollOffset[mode][PAGE_TODO]) {
+    scrollOffset[mode][PAGE_TODO] = todoSelected[mode];
     return;
   }
-  int last = lastVisibleTodoIndex(scrollOffset[PAGE_TODO]);
-  if (todoSelected > last) {
-    scrollOffset[PAGE_TODO] = todoSelected;
+  int last = lastVisibleTodoIndex(scrollOffset[mode][PAGE_TODO]);
+  if (todoSelected[mode] > last) {
+    scrollOffset[mode][PAGE_TODO] = todoSelected[mode];
   }
 }
 
@@ -635,7 +743,9 @@ void drawStrikeThrough(int x, int y, int width, int lines, int lineHeight, uint1
 }
 
 void drawTodoPage() {
-  if (feed.todoCount == 0) {
+  FeedBucket &bucket = currentBucket();
+  int mode = modeIndex(currentMode);
+  if (bucket.todoCount == 0) {
     setFont(14);
     drawWrapped("Empty", 8, 44, M5.Display.width() - 16, 18, TFT_LIGHTGREY, 2);
     return;
@@ -644,15 +754,15 @@ void drawTodoPage() {
   clampScroll(PAGE_TODO);
   ensureTodoVisible();
   int y = LIST_TOP_Y;
-  int start = scrollOffset[PAGE_TODO];
+  int start = scrollOffset[mode][PAGE_TODO];
   int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
   setFont(12);
-  for (int i = start; i < static_cast<int>(feed.todoCount); ++i) {
-    int lines = countWrappedLines(feed.todos[i].title, todoTextWidth(), TODO_MAX_LINES);
+  for (int i = start; i < static_cast<int>(bucket.todoCount); ++i) {
+    int lines = countWrappedLines(bucket.todos[i].title, todoTextWidth(), TODO_MAX_LINES);
     int rowH = lines * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
     if (y + rowH > bottom) break;
-    bool selected = (i == todoSelected);
-    uint16_t textColor = feed.todos[i].completed ? TFT_LIGHTGREY : TFT_WHITE;
+    bool selected = (i == todoSelected[mode]);
+    uint16_t textColor = bucket.todos[i].completed ? TFT_LIGHTGREY : TFT_WHITE;
     if (selected) {
       M5.Display.fillRect(0, y, M5.Display.width(), rowH, TFT_DARKGREY);
       M5.Display.fillRect(0, y, 4, rowH, TFT_CYAN);
@@ -662,9 +772,86 @@ void drawTodoPage() {
     M5.Display.drawString(">", 8, y + 5);
     M5.Display.setTextColor(textColor);
     int textY = y + 4;
-    drawWrapped(feed.todos[i].title, TODO_TEXT_X, textY, todoTextWidth(), TODO_LINE_HEIGHT, textColor,
+    drawWrapped(bucket.todos[i].title, TODO_TEXT_X, textY, todoTextWidth(), TODO_LINE_HEIGHT, textColor,
                 TODO_MAX_LINES);
-    if (feed.todos[i].completed) {
+    if (bucket.todos[i].completed) {
+      drawStrikeThrough(TODO_TEXT_X, textY, todoTextWidth(), lines, TODO_LINE_HEIGHT, TFT_LIGHTGREY);
+    }
+    y += rowH;
+  }
+}
+
+int lastVisibleShoppingIndex(int start) {
+  FeedBucket &bucket = currentBucket();
+  if (bucket.shoppingCount == 0) return -1;
+  setFont(12);
+  int y = LIST_TOP_Y;
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
+  int last = start - 1;
+  for (int i = start; i < static_cast<int>(bucket.shoppingCount); ++i) {
+    int rowH = todoRowHeight(bucket.shopping[i].title);
+    if (y + rowH > bottom) break;
+    y += rowH;
+    last = i;
+  }
+  return last < start ? start : last;
+}
+
+void ensureShoppingVisible() {
+  int mode = modeIndex(currentMode);
+  FeedBucket &bucket = currentBucket();
+  if (bucket.shoppingCount == 0) {
+    scrollOffset[mode][PAGE_SHOPPING] = 0;
+    shoppingSelected[mode] = 0;
+    return;
+  }
+  if (shoppingSelected[mode] < 0) shoppingSelected[mode] = 0;
+  if (shoppingSelected[mode] >= static_cast<int>(bucket.shoppingCount)) {
+    shoppingSelected[mode] = static_cast<int>(bucket.shoppingCount) - 1;
+  }
+  if (shoppingSelected[mode] < scrollOffset[mode][PAGE_SHOPPING]) {
+    scrollOffset[mode][PAGE_SHOPPING] = shoppingSelected[mode];
+    return;
+  }
+  int last = lastVisibleShoppingIndex(scrollOffset[mode][PAGE_SHOPPING]);
+  if (shoppingSelected[mode] > last) {
+    scrollOffset[mode][PAGE_SHOPPING] = shoppingSelected[mode];
+  }
+}
+
+void drawShoppingPage() {
+  FeedBucket &bucket = currentBucket();
+  int mode = modeIndex(currentMode);
+  if (bucket.shoppingCount == 0) {
+    setFont(14);
+    drawWrapped("Empty", 8, 44, M5.Display.width() - 16, 18, TFT_LIGHTGREY, 2);
+    return;
+  }
+
+  clampScroll(PAGE_SHOPPING);
+  ensureShoppingVisible();
+  int y = LIST_TOP_Y;
+  int start = scrollOffset[mode][PAGE_SHOPPING];
+  int bottom = M5.Display.height() - LIST_BOTTOM_MARGIN;
+  setFont(12);
+  for (int i = start; i < static_cast<int>(bucket.shoppingCount); ++i) {
+    int lines = countWrappedLines(bucket.shopping[i].title, todoTextWidth(), TODO_MAX_LINES);
+    int rowH = lines * TODO_LINE_HEIGHT + TODO_ROW_PADDING;
+    if (y + rowH > bottom) break;
+    bool selected = (i == shoppingSelected[mode]);
+    uint16_t textColor = bucket.shopping[i].completed ? TFT_LIGHTGREY : TFT_WHITE;
+    if (selected) {
+      M5.Display.fillRect(0, y, M5.Display.width(), rowH, TFT_DARKGREY);
+      M5.Display.fillRect(0, y, 4, rowH, TFT_CYAN);
+    }
+    M5.Display.drawFastHLine(0, y + rowH - 2, M5.Display.width(), TFT_DARKGREY);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.drawString(">", 8, y + 5);
+    M5.Display.setTextColor(textColor);
+    int textY = y + 4;
+    drawWrapped(bucket.shopping[i].title, TODO_TEXT_X, textY, todoTextWidth(), TODO_LINE_HEIGHT, textColor,
+                TODO_MAX_LINES);
+    if (bucket.shopping[i].completed) {
       drawStrikeThrough(TODO_TEXT_X, textY, todoTextWidth(), lines, TODO_LINE_HEIGHT, TFT_LIGHTGREY);
     }
     y += rowH;
@@ -679,10 +866,13 @@ void drawCurrentPage() {
       drawNextPage();
       break;
     case PAGE_TODAY:
-      drawRows(feed.today, feed.todayCount, false, false);
+      drawRows(currentBucket().today, currentBucket().todayCount, false, false);
       break;
     case PAGE_TODO:
       drawTodoPage();
+      break;
+    case PAGE_SHOPPING:
+      drawShoppingPage();
       break;
     case PAGE_DEADLINE:
       drawRows(feed.deadlines, feed.deadlineCount, false, true);
@@ -694,24 +884,36 @@ void drawCurrentPage() {
 }
 
 void nextPage() {
-  currentPage = static_cast<Page>((static_cast<int>(currentPage) + 1) % PAGE_COUNT);
-  scrollOffset[currentPage] = 0;
+  int index = pageIndexForMode(currentMode, currentPage);
+  currentPage = pageAtIndex(currentMode, index + 1);
+  int mode = modeIndex(currentMode);
+  scrollOffset[mode][currentPage] = 0;
   if (currentPage == PAGE_TODO) {
-    todoSelected = 0;
+    todoSelected[mode] = 0;
+  } else if (currentPage == PAGE_SHOPPING) {
+    shoppingSelected[mode] = 0;
+  }
+  drawCurrentPage();
+}
+
+void toggleMode() {
+  currentMode = currentMode == MODE_LIFE ? MODE_PROJECT : MODE_LIFE;
+  if (currentMode == MODE_PROJECT && currentPage == PAGE_SHOPPING) {
+    currentPage = PAGE_NEXT;
   }
   drawCurrentPage();
 }
 
 void scrollDown() {
   if (currentPage == PAGE_NEXT) return;
-  scrollOffset[currentPage]++;
+  scrollOffset[modeIndex(currentMode)][currentPage]++;
   clampScroll(currentPage);
   drawCurrentPage();
 }
 
 void scrollUp() {
   if (currentPage == PAGE_NEXT) return;
-  scrollOffset[currentPage]--;
+  scrollOffset[modeIndex(currentMode)][currentPage]--;
   clampScroll(currentPage);
   drawCurrentPage();
 }
@@ -756,10 +958,50 @@ bool patchTodoCompleted(int id, bool completed) {
   return true;
 }
 
+bool patchShoppingCompleted(int id, bool completed) {
+  if (id <= 0) {
+    feed.message = completed ? "Marked done" : "Reopened";
+    return true;
+  }
+  if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
+    return false;
+  }
+  HTTPClient http;
+  String url = deviceUrlWithToken(String("/shopping/") + String(id));
+  if (!http.begin(url)) {
+    feed.message = "HTTP begin failed";
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+  String payload = String("{\"completed\":") + (completed ? "true" : "false") + "}";
+  int code = http.sendRequest("PATCH", payload);
+  http.end();
+  if (code != HTTP_CODE_OK) {
+    feed.message = String("HTTP ") + code;
+    return false;
+  }
+  feed.message = completed ? "Marked done" : "Reopened";
+  return true;
+}
+
 void handleButtons() {
   M5.update();
   if (M5.BtnA.wasPressed()) {
-    nextPage();
+    aPressed = true;
+    aLongHandled = false;
+    aPressedAt = millis();
+  }
+
+  if (aPressed && M5.BtnA.isPressed() && !aLongHandled && millis() - aPressedAt >= LONG_PRESS_MS) {
+    aLongHandled = true;
+    toggleMode();
+  }
+
+  if (aPressed && M5.BtnA.wasReleased()) {
+    if (!aLongHandled) {
+      nextPage();
+    }
+    aPressed = false;
   }
 
   if (M5.BtnB.wasPressed()) {
@@ -771,12 +1013,27 @@ void handleButtons() {
   if (sidePressed && M5.BtnB.isPressed() && !sideLongHandled && millis() - sidePressedAt >= LONG_PRESS_MS) {
     sideLongHandled = true;
     if (currentPage == PAGE_TODO) {
-      if (feed.todoCount > 0) {
-        TodoItem &item = feed.todos[todoSelected];
+      FeedBucket &bucket = currentBucket();
+      int mode = modeIndex(currentMode);
+      if (bucket.todoCount > 0) {
+        TodoItem &item = bucket.todos[todoSelected[mode]];
         bool nextState = !item.completed;
         item.completed = nextState;
         drawCurrentPage();
         if (!patchTodoCompleted(item.id, nextState)) {
+          feed.message = "Sync failed";
+        }
+        drawFooter();
+      }
+    } else if (currentPage == PAGE_SHOPPING) {
+      FeedBucket &bucket = currentBucket();
+      int mode = modeIndex(currentMode);
+      if (bucket.shoppingCount > 0) {
+        ShoppingItem &item = bucket.shopping[shoppingSelected[mode]];
+        bool nextState = !item.completed;
+        item.completed = nextState;
+        drawCurrentPage();
+        if (!patchShoppingCompleted(item.id, nextState)) {
           feed.message = "Sync failed";
         }
         drawFooter();
@@ -789,9 +1046,19 @@ void handleButtons() {
   if (sidePressed && M5.BtnB.wasReleased()) {
     if (!sideLongHandled) {
       if (currentPage == PAGE_TODO) {
-        if (feed.todoCount > 0) {
-          todoSelected = (todoSelected + 1) % static_cast<int>(feed.todoCount);
+        FeedBucket &bucket = currentBucket();
+        int mode = modeIndex(currentMode);
+        if (bucket.todoCount > 0) {
+          todoSelected[mode] = (todoSelected[mode] + 1) % static_cast<int>(bucket.todoCount);
           ensureTodoVisible();
+          drawCurrentPage();
+        }
+      } else if (currentPage == PAGE_SHOPPING) {
+        FeedBucket &bucket = currentBucket();
+        int mode = modeIndex(currentMode);
+        if (bucket.shoppingCount > 0) {
+          shoppingSelected[mode] = (shoppingSelected[mode] + 1) % static_cast<int>(bucket.shoppingCount);
+          ensureShoppingVisible();
           drawCurrentPage();
         }
       } else {
