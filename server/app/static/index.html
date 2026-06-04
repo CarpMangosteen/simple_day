@@ -118,6 +118,26 @@
       background: #e8f1ff;
       color: var(--ink);
     }
+    .toggle-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .toggle-button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      padding: 6px 12px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .toggle-button.active {
+      border-color: var(--blue);
+      background: #e8f1ff;
+      color: var(--ink);
+    }
     button {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -228,17 +248,25 @@
       <form id="eventForm">
         <label>Title
           <input name="title" required maxlength="80">
+          <input name="title" required maxlength="80">
         </label>
         <label>Time
           <input name="starts_at" type="datetime-local" required>
         </label>
         <label>With
           <input name="participants" maxlength="120">
+          <input name="participants" maxlength="120">
         </label>
         <label>Where
           <input name="location" maxlength="80">
+          <input name="location" maxlength="80">
         </label>
         <label>Category
+          <input type="hidden" name="category" value="life">
+          <div class="toggle-group">
+            <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
+            <button type="button" class="toggle-button" data-category-toggle data-category="project">Project</button>
+          </div>
           <input type="hidden" name="category" value="life">
           <div class="toggle-group">
             <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
@@ -258,8 +286,14 @@
       <form id="todoForm">
         <label>Task
           <input name="title" required maxlength="100">
+          <input name="title" required maxlength="100">
         </label>
         <label>Category
+          <input type="hidden" name="category" value="life">
+          <div class="toggle-group">
+            <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
+            <button type="button" class="toggle-button" data-category-toggle data-category="project">Project</button>
+          </div>
           <input type="hidden" name="category" value="life">
           <div class="toggle-group">
             <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
@@ -276,6 +310,7 @@
       <form id="shoppingForm">
         <label>Item
           <input name="title" required maxlength="100">
+          <input name="title" required maxlength="100">
         </label>
         <button class="primary" type="submit">Add</button>
       </form>
@@ -286,6 +321,7 @@
       <h2>Deadlines</h2>
       <form id="deadlineForm">
         <label>Title
+          <input name="title" required maxlength="100">
           <input name="title" required maxlength="100">
         </label>
         <label>Due
@@ -360,6 +396,18 @@
       const type = category === "project" ? "project" : "life";
       const text = type === "project" ? "Project" : "Life";
       return `<span class="badge ${type}">${text}</span>`;
+    }
+
+    function setCategoryButtons(form, value) {
+      if (!form) return;
+      const input = form.querySelector("input[name='category']");
+      const buttons = form.querySelectorAll("[data-category-toggle]");
+      if (!input || buttons.length === 0) return;
+      const normalized = value === "project" ? "project" : "life";
+      input.value = normalized;
+      buttons.forEach(button => {
+        button.classList.toggle("active", button.dataset.category === normalized);
+      });
     }
 
     function setCategoryButtons(form, value) {
@@ -473,6 +521,7 @@
       if (form && typeof form.reset === "function") form.reset();
       delete form.dataset.editId;
       setCategoryButtons(form, form.category.value || "life");
+      setCategoryButtons(form, form.category.value || "life");
       await loadItems();
     });
 
@@ -486,7 +535,14 @@
         method: id ? "PATCH" : "POST",
         body: JSON.stringify(payload)
       });
+      const id = form.dataset.editId;
+      await api(id ? `/api/todos/${id}` : "/api/todos", {
+        method: id ? "PATCH" : "POST",
+        body: JSON.stringify(payload)
+      });
       if (form && typeof form.reset === "function") form.reset();
+      delete form.dataset.editId;
+      setCategoryButtons(form, form.category.value || "life");
       delete form.dataset.editId;
       setCategoryButtons(form, form.category.value || "life");
       await loadItems();
@@ -530,6 +586,7 @@
           form.reset();
           delete form.dataset.editId;
           setCategoryButtons(form, form.category?.value || "life");
+          setCategoryButtons(form, form.category?.value || "life");
         }
         return;
       }
@@ -541,6 +598,7 @@
         form.starts_at.value = datetimeLocal(item.starts_at);
         form.participants.value = item.participants.join(", ");
         form.location.value = item.location || "";
+        setCategoryButtons(form, item.category || "life");
         setCategoryButtons(form, item.category || "life");
         form.dataset.editId = item.id;
         form.scrollIntoView({ behavior: "smooth", block: "start" });
