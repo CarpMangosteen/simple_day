@@ -98,6 +98,26 @@
       font: inherit;
       font-size: 14px;
     }
+    .toggle-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .toggle-button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      padding: 6px 12px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .toggle-button.active {
+      border-color: var(--blue);
+      background: #e8f1ff;
+      color: var(--ink);
+    }
     button {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -207,22 +227,23 @@
       <h2>Events</h2>
       <form id="eventForm">
         <label>Title
-          <input name="title" required maxlength="80" placeholder="设计评审">
+          <input name="title" required maxlength="80">
         </label>
         <label>Time
           <input name="starts_at" type="datetime-local" required>
         </label>
         <label>With
-          <input name="participants" maxlength="120" placeholder="李小宇, 小姜">
+          <input name="participants" maxlength="120">
         </label>
         <label>Where
-          <input name="location" maxlength="80" placeholder="腾讯会议">
+          <input name="location" maxlength="80">
         </label>
         <label>Category
-          <select name="category">
-            <option value="life">Life</option>
-            <option value="project">Project</option>
-          </select>
+          <input type="hidden" name="category" value="life">
+          <div class="toggle-group">
+            <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
+            <button type="button" class="toggle-button" data-category-toggle data-category="project">Project</button>
+          </div>
         </label>
         <div class="actions">
           <button class="primary" type="submit">Save</button>
@@ -236,13 +257,14 @@
       <h2>TODO</h2>
       <form id="todoForm">
         <label>Task
-          <input name="title" required maxlength="100" placeholder="整理 Simple Day UI 草稿">
+          <input name="title" required maxlength="100">
         </label>
         <label>Category
-          <select name="category">
-            <option value="life">Life</option>
-            <option value="project">Project</option>
-          </select>
+          <input type="hidden" name="category" value="life">
+          <div class="toggle-group">
+            <button type="button" class="toggle-button active" data-category-toggle data-category="life">Life</button>
+            <button type="button" class="toggle-button" data-category-toggle data-category="project">Project</button>
+          </div>
         </label>
         <button class="primary" type="submit">Add</button>
       </form>
@@ -253,7 +275,7 @@
       <h2>Shopping (Life)</h2>
       <form id="shoppingForm">
         <label>Item
-          <input name="title" required maxlength="100" placeholder="牛奶">
+          <input name="title" required maxlength="100">
         </label>
         <button class="primary" type="submit">Add</button>
       </form>
@@ -264,7 +286,7 @@
       <h2>Deadlines</h2>
       <form id="deadlineForm">
         <label>Title
-          <input name="title" required maxlength="100" placeholder="v1.0 simple 发布">
+          <input name="title" required maxlength="100">
         </label>
         <label>Due
           <input name="due_date" type="date" required>
@@ -338,6 +360,18 @@
       const type = category === "project" ? "project" : "life";
       const text = type === "project" ? "Project" : "Life";
       return `<span class="badge ${type}">${text}</span>`;
+    }
+
+    function setCategoryButtons(form, value) {
+      if (!form) return;
+      const input = form.querySelector("input[name='category']");
+      const buttons = form.querySelectorAll("[data-category-toggle]");
+      if (!input || buttons.length === 0) return;
+      const normalized = value === "project" ? "project" : "life";
+      input.value = normalized;
+      buttons.forEach(button => {
+        button.classList.toggle("active", button.dataset.category === normalized);
+      });
     }
 
     function renderItems(data) {
@@ -438,6 +472,7 @@
       });
       if (form && typeof form.reset === "function") form.reset();
       delete form.dataset.editId;
+      setCategoryButtons(form, form.category.value || "life");
       await loadItems();
     });
 
@@ -446,8 +481,14 @@
       const form = event.currentTarget;
       const data = new FormData(form);
       const payload = { title: data.get("title"), category: data.get("category") };
-      await api("/api/todos", { method: "POST", body: JSON.stringify(payload) });
+      const id = form.dataset.editId;
+      await api(id ? `/api/todos/${id}` : "/api/todos", {
+        method: id ? "PATCH" : "POST",
+        body: JSON.stringify(payload)
+      });
       if (form && typeof form.reset === "function") form.reset();
+      delete form.dataset.editId;
+      setCategoryButtons(form, form.category.value || "life");
       await loadItems();
     });
 
@@ -476,11 +517,18 @@
       const target = event.target;
       if (!(target instanceof HTMLButtonElement)) return;
 
+      if (target.dataset.categoryToggle) {
+        const form = target.closest("form");
+        setCategoryButtons(form, target.dataset.category);
+        return;
+      }
+
       if (target.dataset.reset) {
         const form = document.querySelector(`#${target.dataset.reset}`);
         if (form && typeof form.reset === "function") {
           form.reset();
           delete form.dataset.editId;
+          setCategoryButtons(form, form.category?.value || "life");
         }
         return;
       }
@@ -492,7 +540,7 @@
         form.starts_at.value = datetimeLocal(item.starts_at);
         form.participants.value = item.participants.join(", ");
         form.location.value = item.location || "";
-        form.category.value = item.category || "life";
+        setCategoryButtons(form, item.category || "life");
         form.dataset.editId = item.id;
         form.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
@@ -528,11 +576,11 @@
 
       if (target.dataset.editTodo) {
         const item = window.currentItems.todos.find(row => row.id == target.dataset.editTodo);
-        const title = prompt("TODO", item.title);
-        if (title) {
-          await api(`/api/todos/${item.id}`, { method: "PATCH", body: JSON.stringify({ title }) });
-          await loadItems();
-        }
+        const form = document.querySelector("#todoForm");
+        form.title.value = item.title;
+        setCategoryButtons(form, item.category || "life");
+        form.dataset.editId = item.id;
+        form.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
 
